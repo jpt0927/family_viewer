@@ -7,33 +7,56 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:intl/intl.dart';
-
-// Firebase 설정 파일 (flutterfire configure 실행 후 생성됨)
 import 'firebase_options.dart'; 
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   
-  // 1. .env 파일에서 API 키 로드
-  await dotenv.load(fileName: ".env");
-  final String googleMapsKey = dotenv.env['GOOGLE_MAPS_API_KEY'] ?? "";
-
-  // 2. 구글 맵 스크립트를 웹 헤더에 동적으로 주입 (보안 및 유연성)
-  if (googleMapsKey.isNotEmpty) {
-    final script = web.HTMLScriptElement()
-      ..src = "https://maps.googleapis.com/maps/api/js?key=$googleMapsKey"
-      ..id = "google-maps-script";
-    // head 태그에 추가
-    web.document.head?.append(script);
+  // 1. .env 로드
+  try {
+    await dotenv.load(fileName: ".env");
+  } catch (e) {
+    print("환경 변수 로드 실패: $e");
   }
 
-  // 3. Firebase 초기화
-  await Firebase.initializeApp(
-    options: DefaultFirebaseOptions.currentPlatform,
-  );
+  final String googleMapsKey = dotenv.env['GOOGLE_MAPS_API_KEY'] ?? "";
+
+  // 2. 구글 맵 스크립트 주입
+  if (googleMapsKey.isNotEmpty) {
+    final head = web.document.getElementsByTagName('head').item(0) as web.HTMLHeadElement?;
+    
+    if (head != null) {
+      final script = web.HTMLScriptElement()
+        ..src = "https://maps.googleapis.com/maps/api/js?key=$googleMapsKey"
+        ..id = "google-maps-script";
+      head.append(script);
+      print("Google Maps Script Injected.");
+    } else {
+      final body = web.document.body;
+      if (body != null) {
+        final script = web.HTMLScriptElement()
+          ..src = "https://maps.googleapis.com/maps/api/js?key=$googleMapsKey";
+        body.append(script);
+      }
+    }
+  }
+
+  // 3. Firebase 초기화 및 ✅ 오프라인 캐시(로컬 저장소) 활성화
+  try {
+    await Firebase.initializeApp(
+      options: DefaultFirebaseOptions.currentPlatform,
+    );
+    // 이 한 줄로 쿠키 대신 파이어베이스 자체 캐시를 사용하여 로딩 속도를 비약적으로 높입니다.
+    FirebaseFirestore.instance.settings = const Settings(
+      persistenceEnabled: true,
+    );
+  } catch (e) {
+    print("Firebase 초기화 에러: $e");
+  }
 
   runApp(const MaterialApp(
-    title: '가족 위치 확인 서비스',
+    title: '위치 확인 서비스',
+    debugShowCheckedModeBanner: false,
     home: AuthGate(),
   ));
 }
@@ -123,8 +146,10 @@ class FamilyMapPage extends StatefulWidget {
 class _FamilyMapPageState extends State<FamilyMapPage> {
   final Completer<GoogleMapController> _controller = Completer();
   LatLng? _currentCenter;
-  String _lastUpdateStr = "-";
-  bool _isFirstLoad = true;
+  String _lastUpdateStr = "데이터 불러오는 중...";
+  
+  bool _isTrackingMode = true; // 화면 고정 모드 상태 변수
+  bool _isAnimatingCamera = false; // ✅ 코드가 지도를 움직이는 중인지 체크하는 깃발
 
   @override
   Widget build(BuildContext context) {
@@ -140,71 +165,109 @@ class _FamilyMapPageState extends State<FamilyMapPage> {
       body: Column(
         children: [
           Expanded(
-            child: StreamBuilder<QuerySnapshot>(
-              // 최근 24시간 데이터 쿼리
-              stream: FirebaseFirestore.instance
-                  .collection('locations')
-                  .where('timestamp', isGreaterThan: DateTime.now().subtract(const Duration(hours: 24)))
-                  .orderBy('timestamp', descending: false)
-                  .snapshots(),
-              builder: (context, snapshot) {
-                if (snapshot.connectionState == ConnectionState.waiting) {
-                  return const Center(child: CircularProgressIndicator());
-                }
-
-                final docs = snapshot.data?.docs ?? [];
-                Set<Marker> markers = {};
-                Set<Polyline> polylines = {};
-                List<LatLng> polylinePoints = [];
-
-                if (docs.isNotEmpty) {
-                  for (int i = 0; i < docs.length; i++) {
-                    final data = docs[i].data() as Map<String, dynamic>;
-                    final latLng = LatLng(data['latitude'], data['longitude']);
-                    polylinePoints.add(latLng);
-
-                    bool isLast = (i == docs.length - 1);
-                    if (isLast) {
-                      _currentCenter = latLng;
-                      final DateTime time = (data['timestamp'] as Timestamp).toDate();
-                      _lastUpdateStr = DateFormat('MM/dd HH:mm:ss').format(time);
+            child: Stack(
+              children: [
+                StreamBuilder<QuerySnapshot>(
+                  stream: FirebaseFirestore.instance
+                      .collection('locations')
+                      .orderBy('timestamp', descending: true)
+                      .limit(100)
+                      .snapshots(),
+                  builder: (context, snapshot) {
+                    if (snapshot.connectionState == ConnectionState.waiting && _currentCenter == null) {
+                      return const Center(child: CircularProgressIndicator());
                     }
 
-                    markers.add(Marker(
-                      markerId: MarkerId(docs[i].id),
-                      position: latLng,
-                      infoWindow: isLast ? InfoWindow(title: "현재 위치", snippet: _lastUpdateStr) : InfoWindow.noText,
-                      icon: BitmapDescriptor.defaultMarkerWithHue(
-                        isLast ? BitmapDescriptor.hueRed : BitmapDescriptor.hueAzure,
+                    final rawDocs = snapshot.data?.docs ?? [];
+                    final docs = rawDocs.reversed.toList(); 
+
+                    Set<Marker> markers = {};
+                    Set<Polyline> polylines = {};
+                    List<LatLng> polylinePoints = [];
+
+                    if (docs.isNotEmpty) {
+                      for (int i = 0; i < docs.length; i++) {
+                        final data = docs[i].data() as Map<String, dynamic>;
+                        final latLng = LatLng(data['latitude'], data['longitude']);
+                        polylinePoints.add(latLng);
+
+                        bool isLast = (i == docs.length - 1); 
+
+                        if (isLast) {
+                          _currentCenter = latLng;
+                          if (data['timestamp'] != null) {
+                            final DateTime time = (data['timestamp'] as Timestamp).toDate();
+                            _lastUpdateStr = DateFormat('MM/dd HH:mm:ss').format(time);
+                          }
+
+                          // ✅ [핵심 기능] 고정 모드일 때 내비게이션처럼 최신 위치로 계속 카메라 이동
+                          if (_isTrackingMode) {
+                            // 화면 렌더링이 꼬이지 않게 안전하게 실행
+                            WidgetsBinding.instance.addPostFrameCallback((_) {
+                              _moveCamera(latLng);
+                            });
+                          }
+                        }
+
+                        markers.add(Marker(
+                          markerId: MarkerId(docs[i].id),
+                          position: latLng,
+                          infoWindow: isLast ? InfoWindow(title: "최신 위치", snippet: _lastUpdateStr) : InfoWindow.noText,
+                          icon: BitmapDescriptor.defaultMarkerWithHue(
+                            isLast ? BitmapDescriptor.hueRed : BitmapDescriptor.hueAzure,
+                          ),
+                          alpha: isLast ? 1.0 : 0.5,
+                          zIndex: isLast ? 2.0 : 1.0, 
+                        ));
+                      }
+
+                      polylines.add(Polyline(
+                        polylineId: const PolylineId("path"),
+                        points: polylinePoints,
+                        color: Colors.blueAccent.withOpacity(0.8),
+                        width: 5,
+                      ));
+                    }
+
+                    return GoogleMap(
+                      initialCameraPosition: CameraPosition(
+                        target: _currentCenter ?? const LatLng(37.5665, 126.9780),
+                        zoom: 16,
                       ),
-                    ));
-                  }
-
-                  polylines.add(Polyline(
-                    polylineId: const PolylineId("path"),
-                    points: polylinePoints,
-                    color: Colors.blue.withOpacity(0.7),
-                    width: 4,
-                  ));
-
-                  // 첫 로딩 시 혹은 새로운 데이터가 왔을 때 카메라 이동
-                  if (_isFirstLoad && _currentCenter != null) {
-                    _moveCamera(_currentCenter!);
-                    _isFirstLoad = false;
-                  }
-                }
-
-                return GoogleMap(
-                  initialCameraPosition: CameraPosition(
-                    target: _currentCenter ?? const LatLng(37.5665, 126.9780),
-                    zoom: 16,
+                      markers: markers,
+                      polylines: polylines,
+                      onMapCreated: (controller) => _controller.complete(controller),
+                      myLocationButtonEnabled: false,
+                      // ✅ [핵심 해결] '코드가 움직일 때'는 자유 모드로 풀리지 않게 방어
+                      onCameraMoveStarted: () {
+                        if (_isTrackingMode && !_isAnimatingCamera) {
+                          setState(() { _isTrackingMode = false; });
+                        }
+                      },
+                    );
+                  },
+                ),
+                // 모드 전환 플로팅 버튼
+                Positioned(
+                  top: 16,
+                  right: 16,
+                  child: FloatingActionButton.extended(
+                    onPressed: () {
+                      setState(() {
+                        _isTrackingMode = !_isTrackingMode;
+                        // 고정 모드로 돌아올 때 즉시 카메라를 당겨옴
+                        if (_isTrackingMode && _currentCenter != null) {
+                          _moveCamera(_currentCenter!);
+                        }
+                      });
+                    },
+                    backgroundColor: _isTrackingMode ? Colors.blueAccent : Colors.white,
+                    foregroundColor: _isTrackingMode ? Colors.white : Colors.blueAccent,
+                    icon: Icon(_isTrackingMode ? Icons.gps_fixed : Icons.explore),
+                    label: Text(_isTrackingMode ? "화면 고정 중" : "자유 이동 모드"),
                   ),
-                  markers: markers,
-                  polylines: polylines,
-                  onMapCreated: (controller) => _controller.complete(controller),
-                  myLocationButtonEnabled: false,
-                );
-              },
+                ),
+              ],
             ),
           ),
           _buildStatusPanel(),
@@ -217,7 +280,7 @@ class _FamilyMapPageState extends State<FamilyMapPage> {
   Widget _buildStatusPanel() {
     return Container(
       padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
+      decoration: const BoxDecoration(
         color: Colors.white,
         boxShadow: [BoxShadow(color: Colors.black12, blurRadius: 10, offset: Offset(0, -5))],
       ),
@@ -239,7 +302,7 @@ class _FamilyMapPageState extends State<FamilyMapPage> {
               height: 50,
               child: ElevatedButton.icon(
                 onPressed: _sendInstantRequest,
-                icon: const Icon(Icons.gps_fixed),
+                icon: const Icon(Icons.touch_app),
                 label: const Text("즉시 현재 위치 요청 (강제 호출)", style: TextStyle(fontSize: 16)),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: Colors.orange,
@@ -254,13 +317,24 @@ class _FamilyMapPageState extends State<FamilyMapPage> {
     );
   }
 
-  // 카메라 이동 로직
+  // ✅ 개선된 카메라 이동 로직 (플래그 사용)
   Future<void> _moveCamera(LatLng pos) async {
+    if (!mounted) return;
+    
+    _isAnimatingCamera = true; // 코드로 움직인다고 시스템에 선언!
+    
     final GoogleMapController controller = await _controller.future;
-    controller.animateCamera(CameraUpdate.newLatLngZoom(pos, 16));
+    await controller.animateCamera(CameraUpdate.newLatLngZoom(pos, 16));
+    
+    // 애니메이션이 끝날 즈음 플래그 해제 (안전하게 1.5초 대기)
+    Future.delayed(const Duration(milliseconds: 1500), () {
+      if (mounted) {
+        _isAnimatingCamera = false;
+      }
+    });
   }
 
-  // 할아버지 앱에 즉시 전송 명령 하달
+  // 앱에 즉시 전송 명령 하달
   void _sendInstantRequest() async {
     await FirebaseFirestore.instance.collection('commands').doc('request_location').set({
       'timestamp': FieldValue.serverTimestamp(),

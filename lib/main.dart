@@ -9,6 +9,9 @@ import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:intl/intl.dart';
 import 'firebase_options.dart'; 
 
+BitmapDescriptor? _newMarkerIcon;
+BitmapDescriptor? _oldMarkerIcon;
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   
@@ -152,6 +155,27 @@ class _FamilyMapPageState extends State<FamilyMapPage> {
   bool _isAnimatingCamera = false; // ✅ 코드가 지도를 움직이는 중인지 체크하는 깃발
 
   @override
+  void initState() {
+    super.initState();
+    _loadCustomMarkers(); // ✅ 앱 실행 시 이미지 마커 로드
+  }
+
+  // ✅ 커스텀 마커 이미지 불러오기 함수
+  Future<void> _loadCustomMarkers() async {
+    _newMarkerIcon = await BitmapDescriptor.asset(
+      const ImageConfiguration(size: Size(48, 48)),
+      'assets/marker_new.png',
+    );
+    _oldMarkerIcon = await BitmapDescriptor.asset(
+      const ImageConfiguration(size: Size(32, 32)), // 예전 위치는 크기를 살짝 작게
+      'assets/marker_old.png',
+    );
+    if (mounted) {
+      setState(() {}); // 로드 완료 시 화면 갱신
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
@@ -213,19 +237,19 @@ class _FamilyMapPageState extends State<FamilyMapPage> {
                           markerId: MarkerId(docs[i].id),
                           position: latLng,
                           infoWindow: isLast ? InfoWindow(title: "최신 위치", snippet: _lastUpdateStr) : InfoWindow.noText,
-                          icon: BitmapDescriptor.defaultMarkerWithHue(
-                            isLast ? BitmapDescriptor.hueRed : BitmapDescriptor.hueAzure,
-                          ),
-                          alpha: isLast ? 1.0 : 0.5,
-                          zIndex: isLast ? 2.0 : 1.0, 
+                          icon: isLast 
+                              ? (_newMarkerIcon ?? BitmapDescriptor.defaultMarker)
+                              : (_oldMarkerIcon ?? BitmapDescriptor.defaultMarker),
+                          alpha: isLast ? 1.0 : 0.4,
+                          zIndexInt: isLast ? 2 : 1, 
                         ));
                       }
 
                       polylines.add(Polyline(
                         polylineId: const PolylineId("path"),
                         points: polylinePoints,
-                        color: Colors.blueAccent.withOpacity(0.8),
-                        width: 5,
+                        color: Colors.blueAccent.withOpacity(0.4),
+                        width: 4,
                       ));
                     }
 

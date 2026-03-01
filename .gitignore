@@ -43,3 +43,38 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Flutter/Dart 관련 빌드 결과물 및 캐시
+.dart_tool/
+.packages
+.pub-cache/
+.pub/
+build/
+
+# 안드로이드 관련 (로컬 설정 및 빌드 파일)
+android/local.properties
+android/key.properties
+android/app/build/
+.gradle/
+*.keystore
+*.jks
+
+# 웹 관련 빌드 결과물
+build/web/
+
+# IDE(에디터) 설정 파일
+.vscode/
+.idea/
+*.iml
+*.swp
+.DS_Store (Mac 사용시)
+
+# 🔥 중요: Firebase 및 보안 관련 파일 (비공개 필수)
+# FlutterFire CLI가 생성하는 설정 파일
+lib/firebase_options.dart
+
+# 안드로이드용 Firebase 설정 파일
+android/app/google-services.json
+
+# 커스텀 API 키 파일 (혹시 따로 만드셨다면)
+*.env

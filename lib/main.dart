@@ -154,10 +154,20 @@ class _FamilyMapPageState extends State<FamilyMapPage> {
   bool _isTrackingMode = true; // 화면 고정 모드 상태 변수
   bool _isAnimatingCamera = false; // ✅ 코드가 지도를 움직이는 중인지 체크하는 깃발
 
+  bool _isCooldown = false;
+  int _remainingTime = 0;
+  Timer? _cooldownTimer;
+
   @override
   void initState() {
     super.initState();
     _loadCustomMarkers(); // ✅ 앱 실행 시 이미지 마커 로드
+  }
+
+  @override
+  void dispose() {
+    _cooldownTimer?.cancel();
+    super.dispose();
   }
 
   // ✅ 커스텀 마커 이미지 불러오기 함수
@@ -324,12 +334,24 @@ class _FamilyMapPageState extends State<FamilyMapPage> {
             SizedBox(
               width: double.infinity,
               height: 50,
+              // ✅ 쿨다운 상태에 따라 UI가 동적으로 변함
               child: ElevatedButton.icon(
-                onPressed: _sendInstantRequest,
-                icon: const Icon(Icons.touch_app),
-                label: const Text("즉시 현재 위치 요청 (강제 호출)", style: TextStyle(fontSize: 16)),
+                // 쿨다운 중이면 null을 줘서 버튼 클릭을 막음
+                onPressed: _isCooldown ? null : _sendInstantRequest,
+                icon: _isCooldown
+                    ? const SizedBox(
+                        width: 20, height: 20, 
+                        child: CircularProgressIndicator(strokeWidth: 2)
+                      )
+                    : const Icon(Icons.touch_app),
+                label: Text(
+                  _isCooldown ? "요청 완료 ($_remainingTime초 후 다시 가능)" : "즉시 현재 위치 요청 (강제 호출)", 
+                  style: const TextStyle(fontSize: 16)
+                ),
                 style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.orange,
+                  backgroundColor: Colors.orange, // 눌려지지 않을 때의 색상은 안드로이드가 자동 처리
+                  disabledBackgroundColor: Colors.grey[300], // 비활성화 색상
+                  disabledForegroundColor: Colors.grey[700],
                   foregroundColor: Colors.white,
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                 ),
@@ -360,12 +382,38 @@ class _FamilyMapPageState extends State<FamilyMapPage> {
 
   // 앱에 즉시 전송 명령 하달
   void _sendInstantRequest() async {
+    if (_isCooldown) return; // 혹시 모를 중복 실행 철벽 방어
+
+    setState(() {
+      _isCooldown = true;
+      _remainingTime = 10; // 10초 쿨다운 시작
+    });
+
+    // 파이어베이스에 데이터 쓰기 (명령 하달)
     await FirebaseFirestore.instance.collection('commands').doc('request_location').set({
       'timestamp': FieldValue.serverTimestamp(),
     });
+    
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text("대상 스마트폰에 위치 전송 명령을 보냈습니다.")),
     );
+
+    // 1초마다 돌아가는 타이머 시작
+    _cooldownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      
+      setState(() {
+        if (_remainingTime > 1) {
+          _remainingTime--; // 1초씩 감소
+        } else {
+          _isCooldown = false; // 10초 끝나면 쿨다운 해제
+          timer.cancel(); // 타이머 폭파
+        }
+      });
+    });
   }
 }

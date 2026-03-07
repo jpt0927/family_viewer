@@ -219,9 +219,20 @@ class _FamilyMapPageState extends State<FamilyMapPage> {
                     Set<Polyline> polylines = {};
                     List<LatLng> polylinePoints = [];
 
+                    final DateTime timeLimit24h = DateTime.now().subtract(const Duration(hours: 24));
+
                     if (docs.isNotEmpty) {
                       for (int i = 0; i < docs.length; i++) {
                         final data = docs[i].data() as Map<String, dynamic>;
+
+                        DateTime? pointTime;
+                        if (data['timestamp'] != null) {
+                          pointTime = (data['timestamp'] as Timestamp).toDate();
+                          if (pointTime.isBefore(timeLimit24h)) {
+                            continue;
+                          }
+                        }
+
                         final latLng = LatLng(data['latitude'], data['longitude']);
                         polylinePoints.add(latLng);
 
@@ -301,6 +312,40 @@ class _FamilyMapPageState extends State<FamilyMapPage> {
                     label: Text(_isTrackingMode ? "화면 고정 중" : "자유 이동 모드"),
                   ),
                 ),
+                Positioned(
+                  top: 16,
+                  left: 16,
+                  child: SizedBox(
+                    height: 56,
+                    width: 56, 
+                    child: FloatingActionButton(
+                      heroTag: "btn_naver", 
+                      onPressed: () {
+                        if (_currentCenter != null) {
+                          _openNaverMap(_currentCenter!);
+                        } else {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text("위치를 아직 불러오지 못했습니다.")),
+                          );
+                        }
+                      },
+                      backgroundColor: const Color(0xFF2DB400), 
+                      foregroundColor: Colors.white,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(16), 
+                      ),
+                      elevation: 4,
+                      child: const Text(
+                        "N",
+                        style: TextStyle(
+                          fontSize: 30, 
+                          fontWeight: FontWeight.w900, 
+                          fontFamily: 'Arial'
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
               ],
             ),
           ),
@@ -361,6 +406,26 @@ class _FamilyMapPageState extends State<FamilyMapPage> {
         ),
       ),
     );
+  }
+
+  // 네이버 지도 앱 열기 함수
+  void _openNaverMap(LatLng pos) {
+    // 1. 네이버 지도 웹 표준 주소 (스마트폰이 알아서 앱으로 가로채서 엽니다)
+    final String naverWebUrl = 
+        'https://map.naver.com/v5/search/${pos.latitude},${pos.longitude}';
+
+    try {
+      // 2. 브라우저의 새 창(_blank) 열기 기능을 직접 호출 (가장 에러가 없는 원초적이고 확실한 방법)
+      web.window.open(naverWebUrl, '_blank');
+    } catch (e) {
+      print("웹 창 열기 실패: $e");
+      // UI상 에러 메시지 처리 (옵션)
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("지도를 열 수 없습니다. 팝업 차단을 해제해 주세요.")),
+        );
+      }
+    }
   }
 
   // ✅ 개선된 카메라 이동 로직 (플래그 사용)
